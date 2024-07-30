@@ -186,6 +186,9 @@ func checkAndSetOptions(opt *Options) error {
 
 // Open returns a new DB object.
 func Open(opt Options) (*DB, error) {
+	if opt.Logger == nil {
+		opt.Logger = defaultLogger(INFO)
+	}
 	if err := checkAndSetOptions(&opt); err != nil {
 		return nil, err
 	}
@@ -204,6 +207,7 @@ func Open(opt Options) (*DB, error) {
 			if err != nil {
 				return nil, err
 			}
+			opt.Infof("lock acquire successfully for dir%s", opt.Dir)
 			defer func() {
 				if dirLockGuard != nil {
 					_ = dirLockGuard.release()
@@ -213,15 +217,19 @@ func Open(opt Options) (*DB, error) {
 			if err != nil {
 				return nil, err
 			}
+			opt.Infof("absolute path for dir%s", opt.Dir)
 			absValueDir, err := filepath.Abs(opt.ValueDir)
 			if err != nil {
 				return nil, err
 			}
+			opt.Infof("absolute path for valueDir%s", opt.ValueDir)
+
 			if absValueDir != absDir {
 				valueDirLockGuard, err = acquireDirectoryLock(opt.ValueDir, lockFile, opt.ReadOnly)
 				if err != nil {
 					return nil, err
 				}
+				opt.Infof("lock acquire successfully for valueDir%s", opt.ValueDir)
 				defer func() {
 					if valueDirLockGuard != nil {
 						_ = valueDirLockGuard.release()
@@ -229,12 +237,15 @@ func Open(opt Options) (*DB, error) {
 				}()
 			}
 		}
+		opt.Infof("InMemory opt was enabled and successfully configured")
 	}
 
 	manifestFile, manifest, err := openOrCreateManifestFile(opt)
 	if err != nil {
 		return nil, err
 	}
+	opt.Infof("manifest file successfully createdOROpened")
+
 	defer func() {
 		if manifestFile != nil {
 			_ = manifestFile.close()
@@ -283,6 +294,7 @@ func Open(opt Options) (*DB, error) {
 		if err != nil {
 			return nil, y.Wrap(err, "failed to create data cache")
 		}
+		opt.Infof("BlockCacheSize opt was enabled and successfully configured")
 	}
 
 	if opt.IndexCacheSize > 0 {
@@ -305,6 +317,8 @@ func Open(opt Options) (*DB, error) {
 		if err != nil {
 			return nil, y.Wrap(err, "failed to create bf cache")
 		}
+		opt.Infof("IndexCacheSize opt was enabled and successfully configured")
+
 	}
 
 	db.closers.cacheHealth = z.NewCloser(1)
@@ -368,13 +382,16 @@ func Open(opt Options) (*DB, error) {
 	if err = db.vlog.open(db); err != nil {
 		return db, y.Wrapf(err, "During db.vlog.open")
 	}
+	opt.Infof("vlog file(s) are open")
 
 	// Let's advance nextTxnTs to one more than whatever we observed via
 	// replaying the logs.
 	db.orc.txnMark.Done(db.orc.nextTxnTs)
+	opt.Infof("txnMark marked as done")
 	// In normal mode, we must update readMark so older versions of keys can be removed during
 	// compaction when run in offline mode via the flatten tool.
 	db.orc.readMark.Done(db.orc.nextTxnTs)
+	opt.Infof("readMark marked as done")
 	db.orc.incrementNextTs()
 
 	go db.threshold.listenForValueThresholdUpdate()
@@ -397,6 +414,7 @@ func Open(opt Options) (*DB, error) {
 	valueDirLockGuard = nil
 	dirLockGuard = nil
 	manifestFile = nil
+	opt.Infof("badger db successfully created and returned")
 	return db, nil
 }
 
@@ -945,7 +963,8 @@ func (db *DB) doWrites(lc *z.Closer) {
 
 // batchSet applies a list of badger.Entry. If a request level error occurs it
 // will be returned.
-//   Check(kv.BatchSet(entries))
+//
+//	Check(kv.BatchSet(entries))
 func (db *DB) batchSet(entries []*Entry) error {
 	req, err := db.sendToWriteCh(entries)
 	if err != nil {
@@ -958,9 +977,10 @@ func (db *DB) batchSet(entries []*Entry) error {
 // batchSetAsync is the asynchronous version of batchSet. It accepts a callback
 // function which is called when all the sets are complete. If a request level
 // error occurs, it will be passed back via the callback.
-//   err := kv.BatchSetAsync(entries, func(err error)) {
-//      Check(err)
-//   }
+//
+//	err := kv.BatchSetAsync(entries, func(err error)) {
+//	   Check(err)
+//	}
 func (db *DB) batchSetAsync(entries []*Entry, f func(error)) error {
 	req, err := db.sendToWriteCh(entries)
 	if err != nil {
@@ -1719,16 +1739,16 @@ func (db *DB) dropAll() (func(), error) {
 }
 
 // DropPrefix would drop all the keys with the provided prefix. It does this in the following way:
-// - Stop accepting new writes.
-// - Stop memtable flushes before acquiring lock. Because we're acquring lock here
-//   and memtable flush stalls for lock, which leads to deadlock
-// - Flush out all memtables, skipping over keys with the given prefix, Kp.
-// - Write out the value log header to memtables when flushing, so we don't accidentally bring Kp
-//   back after a restart.
-// - Stop compaction.
-// - Compact L0->L1, skipping over Kp.
-// - Compact rest of the levels, Li->Li, picking tables which have Kp.
-// - Resume memtable flushes, compactions and writes.
+//   - Stop accepting new writes.
+//   - Stop memtable flushes before acquiring lock. Because we're acquring lock here
+//     and memtable flush stalls for lock, which leads to deadlock
+//   - Flush out all memtables, skipping over keys with the given prefix, Kp.
+//   - Write out the value log header to memtables when flushing, so we don't accidentally bring Kp
+//     back after a restart.
+//   - Stop compaction.
+//   - Compact L0->L1, skipping over Kp.
+//   - Compact rest of the levels, Li->Li, picking tables which have Kp.
+//   - Resume memtable flushes, compactions and writes.
 func (db *DB) DropPrefix(prefixes ...[]byte) error {
 	if len(prefixes) == 0 {
 		return nil
